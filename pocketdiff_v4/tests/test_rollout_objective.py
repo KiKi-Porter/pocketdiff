@@ -140,3 +140,28 @@ def test_multistep_rollout_loss_has_finite_backward():
     ]
     assert gradients
     assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
+def test_oracle_rigid_loss_trains_rigid_heads_without_chi_gradients():
+    random.seed(23)
+    torch.manual_seed(23)
+    batch = collate_complexes([_record()])
+    model = _model()
+    loss, metrics = _rollout_loss(
+        model,
+        batch,
+        max_steps=2,
+        oracle_rollout=True,
+        disable_chi=True,
+        direction_weight=0.1,
+    )
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert torch.isfinite(metrics["endpoint_loss"])
+    assert model.translation_gate[-1].weight.grad is not None
+    assert model.rotation_gate[-1].weight.grad is not None
+    assert model.translation_gate[-1].weight.grad.abs().sum() > 0
+    assert model.rotation_gate[-1].weight.grad.abs().sum() > 0
+    chi_grad = model.chi_head[-1].weight.grad
+    assert chi_grad is None or torch.allclose(chi_grad, torch.zeros_like(chi_grad))

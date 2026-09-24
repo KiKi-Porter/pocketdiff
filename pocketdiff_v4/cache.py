@@ -8,10 +8,12 @@ from typing import Dict, List
 import torch
 
 from .geometry import pack_chi_sparse, residue_level_names
+from .constants import NUM_CHI, TARGETDIFF_RESIDUE_IDS
+from pocketdiff.geometry.current_state import AMBIGUOUS_CHI_SLOTS
 
 
 CACHE_FORMAT = "pocketdiff-v4-residue-cache"
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 
 def _radius_edges(source: torch.Tensor, target: torch.Tensor, cutoff: float,
@@ -57,9 +59,20 @@ def encode_complex(value, split: str) -> Dict[str, object]:
         atom_to_residue,
         nr,
     )
-    chi_axis, chi_ptr, chi_downstream, topology_chi_mask = pack_chi_sparse(
+    chi_axis, chi_ptr, chi_downstream, topology_chi_mask, chi_quartet = pack_chi_sparse(
         value.protein_atom_name, residue_names, atom_to_residue
     )
+    residue_type = torch.tensor(
+        [TARGETDIFF_RESIDUE_IDS[name] for name in residue_names], dtype=torch.long
+    )
+    chi_apo = value.chi_apo.float().contiguous()[..., :NUM_CHI]
+    chi_holo = value.chi_holo.float().contiguous()[..., :NUM_CHI]
+    chi_supervision_mask = value.chi_mask.bool()[..., :NUM_CHI] & topology_chi_mask
+    chi_ambiguous_mask = torch.zeros_like(topology_chi_mask)
+    for residue_id, residue_name in enumerate(residue_names):
+        slot = AMBIGUOUS_CHI_SLOTS.get(residue_name.upper())
+        if slot is not None and slot < NUM_CHI:
+            chi_ambiguous_mask[residue_id, slot] = True
     residue_center_apo = torch.zeros(nr, 3)
     residue_counts = torch.bincount(atom_to_residue, minlength=nr).float().clamp_min(1)
     residue_center_apo.index_add_(0, atom_to_residue, apo)
@@ -76,7 +89,7 @@ def encode_complex(value, split: str) -> Dict[str, object]:
             "ligand_pos": ligand,
             "ligand_type": value.ligand_type_ref.long().contiguous(),
             "atom_to_residue": atom_to_residue,
-            "residue_type": value.residue_type.long().contiguous(),
+            "residue_type": residue_type,
             "residue_feature": residue_feature,
             "residue_center_apo": residue_center_apo,
             "frame_index": frame_index,
@@ -84,6 +97,9 @@ def encode_complex(value, split: str) -> Dict[str, object]:
             "chi_axis": chi_axis,
             "chi_ptr": chi_ptr,
             "chi_downstream": chi_downstream,
+            "chi_quartet": chi_quartet,
+            "chi_apo": chi_apo,
+            "chi_ambiguous_mask": chi_ambiguous_mask,
             "rr_edge_index": _radius_edges(
                 residue_center_apo, residue_center_apo, 12.0, exclude_diagonal=True
             ),
@@ -95,9 +111,8 @@ def encode_complex(value, split: str) -> Dict[str, object]:
         },
         "target": {
             "holo_pos": holo,
-            "chi_apo": value.chi_apo.float().contiguous(),
-            "chi_holo": value.chi_holo.float().contiguous(),
-            "chi_supervision_mask": value.chi_mask.bool() & topology_chi_mask,
+            "chi_holo": chi_holo,
+            "chi_supervision_mask": chi_supervision_mask,
         },
     }
 

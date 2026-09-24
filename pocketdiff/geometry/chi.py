@@ -23,10 +23,10 @@ class ChiUpdateResult:
     def __post_init__(self) -> None:
         if self.positions.ndim != 2 or self.positions.shape[-1] != 3:
             raise ValueError("positions must have shape [N, 3]")
-        if self.applied_chi.ndim != 2 or self.applied_chi.shape[-1] != 5:
-            raise ValueError("applied_chi must have shape [Nr, 5]")
+        if self.applied_chi.ndim != 2 or not 1 <= self.applied_chi.shape[-1] <= 5:
+            raise ValueError("applied_chi must have shape [Nr, Nchi] with 1 <= Nchi <= 5")
         if self.valid.dtype != torch.bool or self.valid.shape != self.applied_chi.shape:
-            raise ValueError("valid must be BoolTensor with shape [Nr, 5]")
+            raise ValueError("valid must be BoolTensor with shape [Nr, Nchi]")
         if not (torch.isfinite(self.positions).all() and torch.isfinite(self.applied_chi).all()):
             raise ValueError("χ update outputs must be finite")
 
@@ -44,12 +44,12 @@ class ChiUpdateMetadata:
     def __post_init__(self) -> None:
         if self.axis_start.dtype != torch.long or self.axis_end.dtype != torch.long:
             raise TypeError("axis indices must be LongTensor")
-        if self.axis_start.ndim != 2 or self.axis_start.shape[-1] != 5 or self.axis_end.shape != self.axis_start.shape:
-            raise ValueError("axis indices must have shape [Nr, 5]")
+        if self.axis_start.ndim != 2 or not 1 <= self.axis_start.shape[-1] <= 5 or self.axis_end.shape != self.axis_start.shape:
+            raise ValueError("axis indices must have shape [Nr, Nchi] with 1 <= Nchi <= 5")
         if self.valid.dtype != torch.bool or self.valid.shape != self.axis_start.shape:
             raise ValueError("valid must be BoolTensor with shape [Nr, 5]")
         if self.downstream_atom_mask.ndim != 3 or self.downstream_atom_mask.dtype != torch.bool or self.downstream_atom_mask.shape[:2] != self.axis_start.shape:
-            raise ValueError("downstream_atom_mask must have shape [Nr, 5, N]")
+            raise ValueError("downstream_atom_mask must have shape [Nr, Nchi, N]")
         if self.axis_start.numel() and (
             bool((self.axis_start < -1).any()) or bool((self.axis_end < -1).any())
             or bool((self.axis_start >= self.downstream_atom_mask.shape[-1]).any())
@@ -60,7 +60,7 @@ class ChiUpdateMetadata:
             if self.quartet_indices.dtype != torch.long:
                 raise TypeError("quartet_indices must be LongTensor")
             if self.quartet_indices.shape != self.axis_start.shape + (4,):
-                raise ValueError("quartet_indices must have shape [Nr, 5, 4]")
+                raise ValueError("quartet_indices must have shape [Nr, Nchi, 4]")
             if self.quartet_indices.device != self.axis_start.device:
                 raise ValueError("quartet_indices must share the metadata device")
             if self.quartet_indices.numel() and (
@@ -236,11 +236,11 @@ def _cached_chi_template(
     """Build topology once on CPU; all coordinate-dependent work stays tensorized."""
     residue_count = len(residue_names)
     atom_count = len(atom_names)
-    axis_start = torch.full((residue_count, 5), -1, dtype=torch.long)
+    axis_start = torch.full((residue_count, num_chi), -1, dtype=torch.long)
     axis_end = torch.full_like(axis_start, -1)
-    downstream = torch.zeros((residue_count, 5, atom_count), dtype=torch.bool)
+    downstream = torch.zeros((residue_count, num_chi, atom_count), dtype=torch.bool)
     valid = torch.zeros_like(axis_start, dtype=torch.bool)
-    quartets = torch.full((residue_count, 5, 4), -1, dtype=torch.long)
+    quartets = torch.full((residue_count, num_chi, 4), -1, dtype=torch.long)
     for residue_id, residue_name in enumerate(residue_names):
         name = str(residue_name).upper()
         indices = [i for i, r in enumerate(atom_ids) if r == residue_id]
@@ -415,23 +415,23 @@ def apply_chi_updates(
         raise ValueError("positions must be finite")
     if axis_start.dtype != torch.long or axis_end.dtype != torch.long:
         raise TypeError("axis_start and axis_end must be LongTensor")
-    if axis_start.ndim != 2 or axis_start.shape[-1] != 5 or axis_end.shape != axis_start.shape:
-        raise ValueError("axis indices must have shape [Nr, 5]")
+    if axis_start.ndim != 2 or not 1 <= axis_start.shape[-1] <= 5 or axis_end.shape != axis_start.shape:
+        raise ValueError("axis indices must have shape [Nr, Nchi] with 1 <= Nchi <= 5")
     if chi_delta.ndim != 2 or chi_delta.shape != axis_start.shape or not chi_delta.is_floating_point():
-        raise ValueError("chi_delta must be floating [Nr, 5]")
+        raise ValueError("chi_delta must be floating [Nr, Nchi]")
     if not torch.isfinite(chi_delta).all():
         raise ValueError("chi_delta must be finite")
     num_residues = int(axis_start.shape[0])
     if downstream_atom_mask.dtype != torch.bool or downstream_atom_mask.shape != (
-        num_residues, 5, positions.shape[0]
+        num_residues, axis_start.shape[1], positions.shape[0]
     ):
-        raise ValueError("downstream_atom_mask must have shape [Nr, 5, N]")
+        raise ValueError("downstream_atom_mask must have shape [Nr, Nchi, N]")
     if axis_start.device != positions.device or axis_end.device != positions.device or downstream_atom_mask.device != positions.device or chi_delta.device != positions.device:
         raise ValueError("χ update tensors must be on the same device as positions")
     if valid is None:
         valid = (axis_start >= 0) & (axis_end >= 0)
     if valid.dtype != torch.bool or valid.shape != axis_start.shape:
-        raise ValueError("valid must be BoolTensor with shape [Nr, 5]")
+        raise ValueError("valid must be BoolTensor with shape [Nr, Nchi]")
     if valid.device != positions.device:
         raise ValueError("valid must be on the positions device")
     if not math.isfinite(eps) or eps <= 0.0:
@@ -444,14 +444,14 @@ def apply_chi_updates(
         raise ValueError("axis indices must be -1 or valid global atom indices")
 
     current = positions
-    applied = torch.zeros((num_residues, 5), dtype=chi_delta.dtype, device=positions.device)
-    applied_valid = torch.zeros((num_residues, 5), dtype=torch.bool, device=positions.device)
+    applied = torch.zeros_like(chi_delta)
+    applied_valid = torch.zeros_like(chi_delta, dtype=torch.bool)
     # χ slots remain sequential because χ2 depends on χ1-updated coordinates.
     # Within one slot, operate only on downstream residue/atom pairs.  The
     # previous dense implementation materialized [Nr, N, 3] Rodrigues tensors;
     # the sparse gather/index_add path keeps peak memory proportional to the
     # number of actually rotated atoms.
-    for chi_id in range(5):
+    for chi_id in range(axis_start.shape[1]):
         start = axis_start[:, chi_id].clamp_min(0)
         end = axis_end[:, chi_id].clamp_min(0)
         requested = valid[:, chi_id] & (axis_start[:, chi_id] >= 0) & (axis_end[:, chi_id] >= 0)

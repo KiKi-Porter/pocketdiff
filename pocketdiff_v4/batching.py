@@ -4,6 +4,8 @@ from typing import Dict, List
 
 import torch
 
+from .constants import NUM_CHI
+
 
 def collate_complexes(samples: List[Dict[str, object]]) -> Dict[str, object]:
     """Concatenate variable-size complexes while offsetting every graph index."""
@@ -16,13 +18,13 @@ def collate_complexes(samples: List[Dict[str, object]]) -> Dict[str, object]:
             "apo_pos", "protein_feature", "ligand_pos", "ligand_type",
             "atom_to_residue", "residue_type", "residue_feature",
             "residue_center_apo", "frame_index", "chi_geometry_mask",
-            "chi_axis", "chi_ptr", "chi_downstream", "rr_edge_index",
+            "chi_axis", "chi_ptr", "chi_downstream", "chi_quartet",
+            "chi_apo", "chi_ambiguous_mask", "rr_edge_index",
             "lr_edge_index", "ll_edge_index",
         )
     }
     target_parts = {
         "holo_pos": [],
-        "chi_apo": [],
         "chi_holo": [],
         "chi_supervision_mask": [],
     }
@@ -51,6 +53,24 @@ def collate_complexes(samples: List[Dict[str, object]]) -> Dict[str, object]:
         chi_axis = x["chi_axis"]
         input_parts["chi_axis"].append(
             torch.where(chi_axis >= 0, chi_axis + atoms, chi_axis)
+        )
+        chi_quartet = x.get(
+            "chi_quartet",
+            torch.full(
+                (num_residues, NUM_CHI, 4), -1, dtype=torch.long
+            ),
+        )
+        input_parts["chi_quartet"].append(
+            torch.where(chi_quartet >= 0, chi_quartet + atoms, chi_quartet)
+        )
+        input_parts["chi_apo"].append(
+            x.get("chi_apo", torch.zeros((num_residues, NUM_CHI)))
+        )
+        input_parts["chi_ambiguous_mask"].append(
+            x.get(
+                "chi_ambiguous_mask",
+                torch.zeros((num_residues, NUM_CHI), dtype=torch.bool),
+            )
         )
         input_parts["chi_ptr"].append(x["chi_ptr"][1:] + downstream_atoms)
         input_parts["chi_downstream"].append(x["chi_downstream"] + atoms)

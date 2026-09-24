@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 from .batching import collate_complexes
 from .cache import load_cache
-from .sampler import sample_complexes
+from .sampler import sample_complexes, sample_complexes_with_trajectory
 
 
 def _arguments():
@@ -25,6 +25,7 @@ def _arguments():
     parser.add_argument("--seed", type=int, default=20260924)
     parser.add_argument("--motion-scale", type=float, default=1.0)
     parser.add_argument("--initial-noise-scale", type=float, default=1.0)
+    parser.add_argument("--disable-chi", action="store_true")
     parser.add_argument(
         "--splits",
         nargs="+",
@@ -43,8 +44,28 @@ def _move(value, device):
     return value
 
 
-def _rmsd(left: torch.Tensor, right: torch.Tensor) -> float:
+def _coord_rmse(left: torch.Tensor, right: torch.Tensor) -> float:
     return float(torch.sqrt((left - right).square().mean()).item())
+
+
+def _atom_rmsd(left: torch.Tensor, right: torch.Tensor) -> float:
+    return float(
+        torch.sqrt((left - right).square().sum(dim=-1).mean()).item()
+    )
+
+
+def _direction_cosine(apo: torch.Tensor, holo: torch.Tensor, predicted: torch.Tensor) -> float:
+    target = holo - apo
+    motion = predicted - apo
+    numerator = (target * motion).sum(dim=-1)
+    denominator = (
+        torch.linalg.vector_norm(target, dim=-1)
+        * torch.linalg.vector_norm(motion, dim=-1)
+    ).clamp_min(1e-8)
+    valid = torch.linalg.vector_norm(target, dim=-1) > 1e-8
+    if not bool(valid.any()):
+        return 0.0
+    return float((numerator[valid] / denominator[valid]).mean().item())
 
 
 def _sample_metrics(record: Dict[str, object], predicted: torch.Tensor):
@@ -60,18 +81,54 @@ def _sample_metrics(record: Dict[str, object], predicted: torch.Tensor):
         "sample_id": record["sample_id"],
         "finite": bool(torch.isfinite(predicted).all()),
         "pocket_atoms": int(pocket.sum().item()),
-        "apo_holo_rmsd": _rmsd(apo, holo),
-        "sample_apo_rmsd": _rmsd(predicted, apo),
-        "sample_holo_rmsd": _rmsd(predicted, holo),
-        "improvement": _rmsd(apo, holo) - _rmsd(predicted, holo),
-        "apo_holo_pocket_rmsd": _rmsd(apo[pocket], holo[pocket]),
-        "sample_apo_pocket_rmsd": _rmsd(predicted[pocket], apo[pocket]),
-        "sample_holo_pocket_rmsd": _rmsd(predicted[pocket], holo[pocket]),
-        "pocket_improvement": _rmsd(apo[pocket], holo[pocket])
-        - _rmsd(predicted[pocket], holo[pocket]),
+        "apo_holo_coordinate_rmse": _coord_rmse(apo, holo),
+        "sample_apo_coordinate_rmse": _coord_rmse(predicted, apo),
+        "sample_holo_coordinate_rmse": _coord_rmse(predicted, holo),
+        "improvement_coordinate_rmse": _coord_rmse(apo, holo)
+        - _coord_rmse(predicted, holo),
+        "apo_holo_atom_rmsd": _atom_rmsd(apo, holo),
+        "sample_apo_atom_rmsd": _atom_rmsd(predicted, apo),
+        "sample_holo_atom_rmsd": _atom_rmsd(predicted, holo),
+        "improvement_atom_rmsd": _atom_rmsd(apo, holo)
+        - _atom_rmsd(predicted, holo),
+        "apo_holo_pocket_coordinate_rmse": _coord_rmse(apo[pocket], holo[pocket]),
+        "sample_apo_pocket_coordinate_rmse": _coord_rmse(predicted[pocket], apo[pocket]),
+        "sample_holo_pocket_coordinate_rmse": _coord_rmse(predicted[pocket], holo[pocket]),
+        "pocket_improvement_coordinate_rmse": _coord_rmse(apo[pocket], holo[pocket])
+        - _coord_rmse(predicted[pocket], holo[pocket]),
+        "apo_holo_pocket_atom_rmsd": _atom_rmsd(apo[pocket], holo[pocket]),
+        "sample_apo_pocket_atom_rmsd": _atom_rmsd(predicted[pocket], apo[pocket]),
+        "sample_holo_pocket_atom_rmsd": _atom_rmsd(predicted[pocket], holo[pocket]),
+        "pocket_improvement_atom_rmsd": _atom_rmsd(apo[pocket], holo[pocket])
+        - _atom_rmsd(predicted[pocket], holo[pocket]),
+        "direction_cosine": _direction_cosine(apo, holo, predicted),
         "sample_displacement_mean": float(displacement.mean().item()),
         "sample_displacement_max": float(displacement.max().item()),
     }
+
+
+def _trajectory_metrics(record, trajectory):
+    inputs, targets = record["input"], record["target"]
+    apo = inputs["apo_pos"].to(trajectory[0].device)
+    holo = targets["holo_pos"].to(trajectory[0].device)
+    ligand = inputs["ligand_pos"].to(trajectory[0].device)
+    pocket = torch.cdist(apo, ligand).min(dim=-1).values <= 8.0
+    if not bool(pocket.any()):
+        pocket = torch.ones(apo.shape[0], dtype=torch.bool, device=apo.device)
+    return [
+        {
+            "step": step,
+            "apo_atom_rmsd": _atom_rmsd(state, apo),
+            "holo_atom_rmsd": _atom_rmsd(state, holo),
+            "pocket_apo_atom_rmsd": _atom_rmsd(state[pocket], apo[pocket]),
+            "pocket_holo_atom_rmsd": _atom_rmsd(state[pocket], holo[pocket]),
+            "displacement_mean": float(
+                torch.linalg.vector_norm(state - apo, dim=-1).mean().item()
+            ),
+            "direction_cosine": _direction_cosine(apo, holo, state),
+        }
+        for step, state in enumerate(trajectory)
+    ]
 
 
 def _summarize(rows: List[Dict[str, object]]):
@@ -86,20 +143,37 @@ def _summarize(rows: List[Dict[str, object]]):
         "count": len(rows),
         "finite_count": len(finite),
         "finite_fraction": len(finite) / max(1, len(rows)),
-        "apo_holo_rmsd_mean": mean("apo_holo_rmsd"),
-        "sample_apo_rmsd_mean": mean("sample_apo_rmsd"),
-        "sample_holo_rmsd_mean": mean("sample_holo_rmsd"),
-        "improvement_mean": mean("improvement"),
-        "improved_fraction": sum(row["improvement"] > 0 for row in finite)
-        / len(finite),
-        "apo_holo_pocket_rmsd_mean": mean("apo_holo_pocket_rmsd"),
-        "sample_apo_pocket_rmsd_mean": mean("sample_apo_pocket_rmsd"),
-        "sample_holo_pocket_rmsd_mean": mean("sample_holo_pocket_rmsd"),
-        "pocket_improvement_mean": mean("pocket_improvement"),
-        "pocket_improved_fraction": sum(
-            row["pocket_improvement"] > 0 for row in finite
+        "apo_holo_coordinate_rmse_mean": mean("apo_holo_coordinate_rmse"),
+        "sample_apo_coordinate_rmse_mean": mean("sample_apo_coordinate_rmse"),
+        "sample_holo_coordinate_rmse_mean": mean("sample_holo_coordinate_rmse"),
+        "improvement_coordinate_rmse_mean": mean("improvement_coordinate_rmse"),
+        "improved_coordinate_rmse_fraction": sum(
+            row["improvement_coordinate_rmse"] > 0 for row in finite
         )
         / len(finite),
+        "apo_holo_atom_rmsd_mean": mean("apo_holo_atom_rmsd"),
+        "sample_apo_atom_rmsd_mean": mean("sample_apo_atom_rmsd"),
+        "sample_holo_atom_rmsd_mean": mean("sample_holo_atom_rmsd"),
+        "improvement_atom_rmsd_mean": mean("improvement_atom_rmsd"),
+        "improved_atom_rmsd_fraction": sum(row["improvement_atom_rmsd"] > 0 for row in finite)
+        / len(finite),
+        "apo_holo_pocket_coordinate_rmse_mean": mean("apo_holo_pocket_coordinate_rmse"),
+        "sample_apo_pocket_coordinate_rmse_mean": mean("sample_apo_pocket_coordinate_rmse"),
+        "sample_holo_pocket_coordinate_rmse_mean": mean("sample_holo_pocket_coordinate_rmse"),
+        "pocket_improvement_coordinate_rmse_mean": mean("pocket_improvement_coordinate_rmse"),
+        "pocket_improved_coordinate_rmse_fraction": sum(
+            row["pocket_improvement_coordinate_rmse"] > 0 for row in finite
+        )
+        / len(finite),
+        "apo_holo_pocket_atom_rmsd_mean": mean("apo_holo_pocket_atom_rmsd"),
+        "sample_apo_pocket_atom_rmsd_mean": mean("sample_apo_pocket_atom_rmsd"),
+        "sample_holo_pocket_atom_rmsd_mean": mean("sample_holo_pocket_atom_rmsd"),
+        "pocket_improvement_atom_rmsd_mean": mean("pocket_improvement_atom_rmsd"),
+        "pocket_improved_atom_rmsd_fraction": sum(
+            row["pocket_improvement_atom_rmsd"] > 0 for row in finite
+        )
+        / len(finite),
+        "direction_cosine_mean": mean("direction_cosine"),
         "sample_displacement_mean": mean("sample_displacement_mean"),
         "sample_displacement_max_mean": mean("sample_displacement_max"),
         "pocket_atoms_mean": mean("pocket_atoms"),
@@ -192,7 +266,7 @@ def main():
             batch = _move(collate_complexes(chosen), device)
             inputs = batch["input"]
             sample_ids = batch["target"]["sample_id"]
-            predicted = sample_complexes(
+            predicted, trajectory = sample_complexes_with_trajectory(
                 model,
                 inputs,
                 sample_ids,
@@ -200,11 +274,17 @@ def main():
                 seed=args.seed,
                 motion_scale=args.motion_scale,
                 initial_noise_scale=args.initial_noise_scale,
+                disable_chi=args.disable_chi,
             )
             atom_ptr = inputs["atom_ptr"].tolist()
             for graph_id, record in enumerate(chosen):
                 start, end = atom_ptr[graph_id : graph_id + 2]
-                rows.append(_sample_metrics(record, predicted[start:end]))
+                row = _sample_metrics(record, predicted[start:end])
+                row["trajectory"] = _trajectory_metrics(
+                    record,
+                    [state[start:end] for state in trajectory],
+                )
+                rows.append(row)
         local_rows[split] = rows
 
     output = Path(args.output)
@@ -238,6 +318,7 @@ def main():
             "seed": args.seed,
             "motion_scale": args.motion_scale,
             "initial_noise_scale": args.initial_noise_scale,
+            "disable_chi": args.disable_chi,
             "splits": list(args.splits),
             "initialization": "apo coordinates plus sample-seeded local rigid Gaussian noise",
             "pocket_cutoff_angstrom": 8.0,

@@ -4,6 +4,8 @@ from typing import Dict, List
 
 import torch
 
+from .constants import NUM_CHI
+
 
 def residue_frames(pos: torch.Tensor, frame_index: torch.Tensor):
     """Return CA origins, orthonormal N-CA-C frames, and validity."""
@@ -41,6 +43,48 @@ def axis_angle_matrix(rotvec: torch.Tensor) -> torch.Tensor:
     return eye + a[:, :, None] * skew + b[:, :, None] * (skew @ skew)
 
 
+def rotation_matrix_to_rotvec(rotation: torch.Tensor) -> torch.Tensor:
+    """Return the principal logarithm of a batch of proper 3D rotations."""
+    trace = rotation.diagonal(dim1=-2, dim2=-1).sum(-1)
+    cosine = ((trace - 1.0) * 0.5).clamp(-1.0, 1.0)
+    angle = torch.acos(cosine)
+    vee = torch.stack(
+        (
+            rotation[..., 2, 1] - rotation[..., 1, 2],
+            rotation[..., 0, 2] - rotation[..., 2, 0],
+            rotation[..., 1, 0] - rotation[..., 0, 1],
+        ),
+        dim=-1,
+    )
+    scale = angle / (2.0 * torch.sin(angle).clamp_min(1.0e-6))
+    return torch.where(
+        (angle < 1.0e-4)[..., None],
+        0.5 * vee,
+        scale[..., None] * vee,
+    )
+
+
+def extract_chi_from_quartets(
+    positions: torch.Tensor,
+    quartet_indices: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    """Extract periodic chi angles from cached quartet atom indices."""
+    safe = quartet_indices.clamp_min(0)
+    points = positions[safe]
+    b0 = points[..., 1, :] - points[..., 0, :]
+    b1 = points[..., 2, :] - points[..., 1, :]
+    b2 = points[..., 3, :] - points[..., 2, :]
+    axis = b1 / torch.linalg.vector_norm(b1, dim=-1, keepdim=True).clamp_min(1.0e-8)
+    v = b0 - (b0 * axis).sum(-1, keepdim=True) * axis
+    w = b2 - (b2 * axis).sum(-1, keepdim=True) * axis
+    values = torch.atan2(
+        (torch.cross(axis, v, dim=-1) * w).sum(-1),
+        (v * w).sum(-1),
+    )
+    return torch.where(valid & torch.isfinite(values), values, torch.zeros_like(values))
+
+
 def apply_rigid(
     pos: torch.Tensor,
     atom_to_residue: torch.Tensor,
@@ -70,8 +114,9 @@ def apply_chi_sparse(
     """Apply residue chi rotations, vectorized across residues for each slot."""
     result = pos
     lengths = chi_ptr[1:] - chi_ptr[:-1]
-    for slot in range(5):
-        rows = torch.arange(chi_delta.shape[0], device=pos.device) * 5 + slot
+    slot_count = chi_delta.shape[1]
+    for slot in range(slot_count):
+        rows = torch.arange(chi_delta.shape[0], device=pos.device) * slot_count + slot
         row_lengths = lengths[rows]
         active = chi_mask[:, slot] & (row_lengths > 0) & (chi_axis[:, slot] >= 0).all(-1)
         active_rows = rows[active]
@@ -80,7 +125,7 @@ def apply_chi_sparse(
 
         counts = lengths[active_rows]
         segment_residue = torch.repeat_interleave(
-            torch.div(active_rows, 5, rounding_mode="floor"), counts
+            torch.div(active_rows, slot_count, rounding_mode="floor"), counts
         )
         row_starts = chi_ptr[active_rows]
         segment_starts = torch.cumsum(counts, dim=0) - counts
@@ -124,7 +169,11 @@ def apply_motion(
     t = torch.where(valid[:, None], t, torch.zeros_like(t))
     r = torch.where(valid[:, None], r, torch.zeros_like(r))
     moved = apply_rigid(pos, atom_to_residue, origin, frame, t, r)
-    chi_mask = sample["chi_geometry_mask"].to(device) & valid[:, None]
+    chi_width = chi_delta.shape[1]
+    chi_mask = (
+        sample["chi_geometry_mask"].to(device)[..., :chi_width]
+        & valid[:, None]
+    )
     return apply_chi_sparse(
         moved,
         chi_delta * fraction,
@@ -141,13 +190,15 @@ def pack_chi_sparse(
     """Build compact chi-axis and downstream CSR arrays from atom topology."""
     from pocketdiff.geometry.chi import build_chi_update_metadata
 
-    metadata = build_chi_update_metadata(atom_names, atom_to_residue, residue_names)
+    metadata = build_chi_update_metadata(
+        atom_names, atom_to_residue, residue_names, num_chi=NUM_CHI
+    )
     nr, _, natoms = metadata.downstream_atom_mask.shape
     axes = torch.stack((metadata.axis_start, metadata.axis_end), dim=-1)
     ptr = [0]
     downstream = []
-    for row in range(nr * 5):
-        residue, slot = divmod(row, 5)
+    for row in range(nr * NUM_CHI):
+        residue, slot = divmod(row, NUM_CHI)
         values = torch.where(metadata.downstream_atom_mask[residue, slot])[0].tolist()
         downstream.extend(values)
         ptr.append(len(downstream))
@@ -156,6 +207,7 @@ def pack_chi_sparse(
         torch.tensor(ptr, dtype=torch.long),
         torch.tensor(downstream, dtype=torch.long),
         metadata.valid.bool(),
+        metadata.quartet_indices.long(),
     )
 
 

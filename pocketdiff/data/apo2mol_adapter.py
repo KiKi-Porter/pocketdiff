@@ -29,34 +29,13 @@ import torch.nn.functional as F
 
 from .schema import PocketComplex
 from pocketdiff.geometry.chi import extract_chi_angles
+from pocketdiff_v4.constants import TARGETDIFF_RESIDUE_IDS, TARGETDIFF_RESIDUE_NAMES
 
 
 # Keep these IDs identical to the official TargetDiff definitions without
 # importing or modifying the upstream checkout.
-AA_NAME_NUMBER: Mapping[str, int] = {
-    "ALA": 0,
-    "CYS": 1,
-    "ASP": 2,
-    "GLU": 3,
-    "PHE": 4,
-    "HIS": 5,
-    "ILE": 6,
-    "LYS": 7,
-    "LEU": 8,
-    "MET": 9,
-    "ASN": 10,
-    "PRO": 11,
-    "GLN": 12,
-    "ARG": 13,
-    "SER": 14,
-    "THR": 15,
-    "VAL": 16,
-    "TRP": 17,
-    "TYR": 18,
-    "GLY": 19,
-}
-
-AA_NAMES: Tuple[str, ...] = tuple(AA_NAME_NUMBER)
+AA_NAME_NUMBER: Mapping[str, int] = TARGETDIFF_RESIDUE_IDS
+AA_NAMES: Tuple[str, ...] = TARGETDIFF_RESIDUE_NAMES
 PROTEIN_ELEMENT_ORDER: Tuple[int, ...] = (1, 6, 7, 8, 16, 34)  # H C N O S Se
 BACKBONE_NAMES = frozenset(("CA", "C", "N", "O"))
 
@@ -552,12 +531,14 @@ class Apo2MolAdapter:
             [atom.atom_name for atom in canonical_atoms],
             torch.tensor(atom_to_residue, dtype=torch.long),
             residue_names,
+            num_chi=4,
         )
         chi_holo, chi_holo_mask = extract_chi_angles(
             torch.from_numpy(centered_holo.astype(np.float32, copy=False)),
             [atom.atom_name for atom in canonical_atoms],
             torch.tensor(atom_to_residue, dtype=torch.long),
             residue_names,
+            num_chi=4,
         )
         chi_mask = chi_apo_mask & chi_holo_mask
         chi_apo = torch.where(chi_mask, chi_apo, torch.zeros_like(chi_apo))

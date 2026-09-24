@@ -16,7 +16,7 @@ def main():
     random.seed(317)
     torch.manual_seed(317)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    cache = load_cache("pocketdiff_v4/data/residue_graphs.pt")
+    cache = load_cache("pocketdiff_v4/data/residue_graphs_v41.pt")
     sample = cache["splits"]["train"][0]
     batch = collate_complexes([sample])
 
@@ -37,7 +37,14 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(317)
         optimizer.zero_grad(set_to_none=True)
-        loss, _ = _rollout_loss(model, batch, max_steps=4)
+        loss, _ = _rollout_loss(
+            model,
+            batch,
+            max_steps=4,
+            oracle_rollout=True,
+            disable_chi=True,
+            direction_weight=0.1,
+        )
         if not torch.isfinite(loss):
             raise FloatingPointError("smoke rollout produced non-finite loss")
         loss.backward()

@@ -6,6 +6,7 @@ from typing import Dict, List, Sequence
 import torch
 
 from .geometry import apply_motion
+from .constants import NUM_CHI
 
 
 def sample_seed(seed: int, sample_id: str) -> int:
@@ -53,7 +54,7 @@ def initial_state_from_apo(
         apo,
         translation.to(device=device, dtype=apo.dtype),
         rotation.to(device=device, dtype=apo.dtype),
-        apo.new_zeros((translation.shape[0], 5)),
+        apo.new_zeros((translation.shape[0], NUM_CHI)),
     )
 
 
@@ -67,6 +68,7 @@ def sample_complexes(
     seed: int = 20260924,
     motion_scale: float = 1.0,
     initial_noise_scale: float = 1.0,
+    disable_chi: bool = False,
 ) -> torch.Tensor:
     """Run the training-compatible rigid/chi rollout without target access."""
     if steps <= 0:
@@ -95,8 +97,54 @@ def sample_complexes(
             current,
             prediction["translation_local"] * motion_scale,
             prediction["rotation_local"] * motion_scale,
-            prediction["chi_delta"] * motion_scale,
+            torch.zeros_like(prediction["chi_delta"])
+            if disable_chi
+            else prediction["chi_delta"] * motion_scale,
         )
     if not torch.isfinite(current).all():
         raise FloatingPointError("sampler produced non-finite coordinates")
     return current
+
+
+@torch.inference_mode()
+def sample_complexes_with_trajectory(
+    model,
+    inputs: Dict[str, object],
+    sample_ids: Sequence[str],
+    *,
+    steps: int = 4,
+    seed: int = 20260924,
+    motion_scale: float = 1.0,
+    initial_noise_scale: float = 1.0,
+    disable_chi: bool = False,
+):
+    """Return the final state and every state after initialization/each step."""
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+    current = initial_state_from_apo(
+        inputs,
+        sample_ids,
+        seed=seed,
+        initial_noise_scale=initial_noise_scale,
+    )
+    trajectory = [current.clone()]
+    for step in range(steps):
+        remaining = float(steps - step) / float(steps)
+        prediction = model(
+            {"input": inputs},
+            current,
+            current.new_tensor(remaining),
+        )
+        current = apply_motion(
+            inputs,
+            current,
+            prediction["translation_local"] * motion_scale,
+            prediction["rotation_local"] * motion_scale,
+            torch.zeros_like(prediction["chi_delta"])
+            if disable_chi
+            else prediction["chi_delta"] * motion_scale,
+        )
+        trajectory.append(current.clone())
+    if not torch.isfinite(current).all():
+        raise FloatingPointError("sampler produced non-finite coordinates")
+    return current, trajectory
