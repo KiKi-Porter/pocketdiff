@@ -261,8 +261,13 @@ def _cached_chi_template(
         if name == "PRO":
             continue
         for chi_id, definition in enumerate(CHI_DEFINITIONS.get(name, ())[:num_chi]):
-            quartet = [spec if isinstance(spec, str) else spec[0] for spec in definition]
-            if any(atom not in by_name for atom in quartet):
+            quartet = []
+            for spec in definition:
+                candidates = (spec,) if isinstance(spec, str) else spec
+                quartet.append(
+                    next((candidate for candidate in candidates if candidate in by_name), None)
+                )
+            if any(atom is None for atom in quartet):
                 continue
             quartets[residue_id, chi_id] = torch.tensor(
                 [by_name[atom] for atom in quartet], dtype=torch.long

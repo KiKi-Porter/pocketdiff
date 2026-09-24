@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUN_DIR="${1:-pocketdiff_v4/runs/v42_3000_s4_20260924}"
+RUN_DIR="${1:-pocketdiff_v4/runs/v43_contract_3000_s4_20260924}"
 CHECKPOINT="${2:-${RUN_DIR}/best.pt}"
 OUT_DIR="${3:-${RUN_DIR}/controls_best}"
 
@@ -16,7 +16,7 @@ run_eval() {
   local initial_noise_scale="$3"
   conda run -n targetdiff torchrun --standalone --nproc_per_node=4 \
     --module pocketdiff_v4.evaluate \
-    --data pocketdiff_v4/data/residue_graphs_v41.pt \
+    --data pocketdiff_v4/data/residue_graphs_v42_contract.pt \
     --checkpoint "${CHECKPOINT}" \
     --output "${OUT_DIR}/${name}.json" \
     --batch-size 16 \

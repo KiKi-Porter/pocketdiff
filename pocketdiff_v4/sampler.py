@@ -86,7 +86,8 @@ def sample_complexes(
         initial_noise_scale=initial_noise_scale,
     )
     for step in range(steps):
-        remaining = float(steps - step) / float(steps)
+        remaining_steps = steps - step
+        remaining = float(remaining_steps) / float(steps)
         prediction = model(
             {"input": inputs},
             current,
@@ -95,11 +96,12 @@ def sample_complexes(
         current = apply_motion(
             inputs,
             current,
-            prediction["translation_local"] * motion_scale,
-            prediction["rotation_local"] * motion_scale,
-            torch.zeros_like(prediction["chi_delta"])
+            prediction["remaining_translation_local"] * motion_scale,
+            prediction["remaining_rotvec_local"] * motion_scale,
+            torch.zeros_like(prediction["remaining_chi"])
             if disable_chi
-            else prediction["chi_delta"] * motion_scale,
+            else prediction["remaining_chi"] * motion_scale,
+            fraction=1.0 / float(remaining_steps),
         )
     if not torch.isfinite(current).all():
         raise FloatingPointError("sampler produced non-finite coordinates")
@@ -129,7 +131,8 @@ def sample_complexes_with_trajectory(
     )
     trajectory = [current.clone()]
     for step in range(steps):
-        remaining = float(steps - step) / float(steps)
+        remaining_steps = steps - step
+        remaining = float(remaining_steps) / float(steps)
         prediction = model(
             {"input": inputs},
             current,
@@ -138,11 +141,12 @@ def sample_complexes_with_trajectory(
         current = apply_motion(
             inputs,
             current,
-            prediction["translation_local"] * motion_scale,
-            prediction["rotation_local"] * motion_scale,
-            torch.zeros_like(prediction["chi_delta"])
+            prediction["remaining_translation_local"] * motion_scale,
+            prediction["remaining_rotvec_local"] * motion_scale,
+            torch.zeros_like(prediction["remaining_chi"])
             if disable_chi
-            else prediction["chi_delta"] * motion_scale,
+            else prediction["remaining_chi"] * motion_scale,
+            fraction=1.0 / float(remaining_steps),
         )
         trajectory.append(current.clone())
     if not torch.isfinite(current).all():

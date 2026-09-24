@@ -71,23 +71,23 @@ def main():
         v4_rows, v3_rows = v4["rows"][split], v3["rows"][split]
         result["paired"][split] = {
             "all_protein_rmsd": _paired_summary(
-                v4_rows, v3_rows, "sample_holo_rmsd"
+                v4_rows, v3_rows, "sample_holo_atom_rmsd"
             ),
             "pocket_rmsd": _paired_summary(
-                v4_rows, v3_rows, "sample_holo_pocket_rmsd"
+                v4_rows, v3_rows, "sample_holo_pocket_atom_rmsd"
             ),
             "v4_apo_comparison": {
                 "all_protein_improvement_mean_angstrom": v4["metrics"][split][
-                    "improvement_mean"
+                    "improvement_atom_rmsd_mean"
                 ],
                 "all_protein_improved_fraction": v4["metrics"][split][
-                    "improved_fraction"
+                    "improved_atom_rmsd_fraction"
                 ],
                 "pocket_improvement_mean_angstrom": v4["metrics"][split][
-                    "pocket_improvement_mean"
+                    "pocket_improvement_atom_rmsd_mean"
                 ],
                 "pocket_improved_fraction": v4["metrics"][split][
-                    "pocket_improved_fraction"
+                    "pocket_improved_atom_rmsd_fraction"
                 ],
             },
         }

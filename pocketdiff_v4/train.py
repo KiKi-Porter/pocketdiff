@@ -177,12 +177,10 @@ def _bridge_step_targets(
         holo_frame,
         frame_valid=current_valid & holo_valid,
     )
-    translation = _project_vector_norm(
-        bridge.translation_local / remaining_steps, model.max_translation
-    )
-    rotation = _project_vector_norm(
-        bridge.rotvec_local / remaining_steps, model.max_rotation
-    )
+    # The model predicts the complete current-to-holo transform. The solver
+    # decides how much of it to apply for the current rollout step.
+    translation = bridge.translation_local
+    rotation = bridge.rotvec_local
     cumulative_chi = cumulative_chi[..., :NUM_CHI]
     chi_apo = inputs.get("chi_apo", targets.get("chi_apo"))
     if chi_apo is None:
@@ -191,9 +189,6 @@ def _bridge_step_targets(
         targets["chi_holo"][..., :NUM_CHI]
         - chi_apo[..., :NUM_CHI]
         - cumulative_chi
-    ) / remaining_steps
-    chi = chi.clamp(
-        -0.95 * model.max_chi_step, 0.95 * model.max_chi_step
     )
     chi_mask = targets["chi_supervision_mask"].bool()[..., :NUM_CHI]
     chi = torch.where(chi_mask, chi, torch.zeros_like(chi))
@@ -209,12 +204,17 @@ def _rollout_loss(
     oracle_rollout: bool = False,
     disable_chi: bool = False,
     direction_weight: float = 0.0,
+    step_count: int = None,
 ):
     inputs, targets = batch["input"], batch["target"]
     apo = inputs["apo_pos"].float()
     holo = targets["holo_pos"].float()
     num_residues = inputs["residue_type"].shape[0]
-    if dist.is_available() and dist.is_initialized():
+    if step_count is not None and step_count <= 0:
+        raise ValueError("step_count must be positive")
+    if step_count is not None:
+        num_steps = int(step_count)
+    elif dist.is_available() and dist.is_initialized():
         step_count = torch.tensor(
             [random.randint(2, max_steps) if dist.get_rank() == 0 else 0],
             dtype=torch.long,
@@ -299,10 +299,14 @@ def _rollout_loss(
             target_chi = torch.zeros_like(target_chi)
             chi_mask = torch.zeros_like(chi_mask)
         translation_loss = F.smooth_l1_loss(
-            prediction["translation_local"], target_translation, reduction="none"
+            prediction["remaining_translation_local"],
+            target_translation,
+            reduction="none",
         ).sum(-1)
         rotation_loss = F.smooth_l1_loss(
-            prediction["rotation_local"], target_rotation, reduction="none"
+            prediction["remaining_rotvec_local"],
+            target_rotation,
+            reduction="none",
         ).sum(-1)
         rigid_loss = _graph_balanced_mean(
             translation_loss + rotation_loss,
@@ -310,7 +314,7 @@ def _rollout_loss(
             graph_count,
             mask=rigid_mask,
         )
-        chi_error = _wrap_angle(prediction["chi_delta"] - target_chi)
+        chi_error = _wrap_angle(prediction["remaining_chi"] - target_chi)
         chi_point_loss = torch.where(
             ambiguous_mask,
             1.0 - torch.abs(torch.cos(chi_error)),
@@ -329,16 +333,18 @@ def _rollout_loss(
             target_translation.float(),
             target_rotation.float(),
             target_chi.float(),
+            fraction=1.0 / float(remaining_steps),
         ).detach()
-        predicted_chi = prediction["chi_delta"]
+        predicted_chi = prediction["remaining_chi"]
         if disable_chi:
             predicted_chi = torch.zeros_like(predicted_chi)
         updated = apply_motion(
             inputs,
             current,
-            prediction["translation_local"].float(),
-            prediction["rotation_local"].float(),
+            prediction["remaining_translation_local"].float(),
+            prediction["remaining_rotvec_local"].float(),
             predicted_chi.float(),
+            fraction=1.0 / float(remaining_steps),
         )
         bridge_coordinate_error = F.smooth_l1_loss(
             updated, oracle_next, reduction="none"
@@ -352,11 +358,17 @@ def _rollout_loss(
         coordinate_error = F.smooth_l1_loss(
             updated, holo, reduction="none"
         ).mean(-1)
+        endpoint_weights = atom_weight
+        if disable_chi:
+            backbone_mask = inputs.get("backbone_mask")
+            if backbone_mask is None:
+                backbone_mask = torch.ones_like(atom_weight, dtype=torch.bool)
+            endpoint_weights = endpoint_weights * backbone_mask.to(atom_weight.dtype)
         endpoint = _graph_balanced_mean(
             coordinate_error,
             atom_graph,
             graph_count,
-            weights=atom_weight,
+            weights=endpoint_weights,
         )
         step_loss = 0.2 * rigid_loss + 0.1 * chi_loss + 0.75 * bridge_endpoint
         if direction_weight > 0.0:
@@ -382,10 +394,10 @@ def _rollout_loss(
         endpoint_loss = endpoint_loss + endpoint.detach() / num_steps
         if oracle_rollout:
             current = oracle_next
-            cumulative_chi = cumulative_chi + target_chi.detach()
+            cumulative_chi = cumulative_chi + target_chi.detach() / float(remaining_steps)
         else:
             current = updated.detach()
-            cumulative_chi = cumulative_chi + predicted_chi.detach()
+            cumulative_chi = cumulative_chi + predicted_chi.detach() / float(remaining_steps)
 
     return total_loss, {
         "endpoint_loss": endpoint_loss,
@@ -414,9 +426,11 @@ def _validation_loss(
     oracle_rollout: bool = False,
     disable_chi: bool = False,
     direction_weight: float = 0.0,
+    steps: int = 4,
 ):
     model.eval()
-    values = []
+    loss_sum = torch.zeros((), device=device)
+    sample_count = torch.zeros((), device=device)
     for raw_batch in loader:
         batch = _move_batch(raw_batch, device)
         loss, _ = _rollout_loss(
@@ -428,11 +442,12 @@ def _validation_loss(
             oracle_rollout=oracle_rollout,
             disable_chi=disable_chi,
             direction_weight=direction_weight,
+            step_count=steps,
         )
-        values.append(loss.detach())
-    if not values:
-        return torch.zeros((), device=device)
-    return torch.stack(values).mean()
+        graphs = batch["input"]["atom_ptr"].numel() - 1
+        loss_sum = loss_sum + loss.detach() * float(graphs)
+        sample_count = sample_count + float(graphs)
+    return loss_sum, sample_count
 
 
 def _synchronize_gradients(model, world: int):
@@ -463,6 +478,7 @@ def _parse_args():
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=32, help="per-rank batch size")
     parser.add_argument("--max-steps", type=int, default=5)
+    parser.add_argument("--validation-steps", type=int, default=4)
     parser.add_argument("--noise-scale-min", type=float, default=0.0)
     parser.add_argument("--noise-scale-max", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -637,8 +653,8 @@ def main():
             if rank == 0 and (step % args.save_every == 0 or step == updates):
                 _save_checkpoint(output_dir / "latest.pt", {
                     "format": "pocketdiff-v4-checkpoint",
-                    "version": 3,
-                    "architecture": "pocketdiff-v4.2-rigid-oracle-bridge",
+                    "version": 4,
+                    "architecture": "pocketdiff-v4.3-remaining-transform-contract",
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "scaler": scaler.state_dict(),
@@ -651,20 +667,23 @@ def main():
         if args.valid_every > 0 and epoch % args.valid_every == 0:
             if valid_sampler is not None:
                 valid_sampler.set_epoch(epoch)
-            valid_value = _validation_loss(
+            valid_sum, valid_count = _validation_loss(
                 model,
                 valid_loader,
                 device,
                 args.max_steps,
-                oracle_rollout=args.oracle_rollout,
+                # The deployment objective is autonomous; oracle rollout is
+                # retained only as an optional training diagnostic.
+                oracle_rollout=False,
                 disable_chi=args.disable_chi,
                 direction_weight=args.direction_weight,
+                steps=args.validation_steps,
             )
             if distributed:
-                dist.all_reduce(valid_value, op=dist.ReduceOp.SUM)
-                valid_value /= world
+                dist.all_reduce(valid_sum, op=dist.ReduceOp.SUM)
+                dist.all_reduce(valid_count, op=dist.ReduceOp.SUM)
             if rank == 0:
-                current_valid = float(valid_value.item())
+                current_valid = float((valid_sum / valid_count.clamp_min(1.0)).item())
                 print(
                     json.dumps(
                         {
@@ -679,8 +698,8 @@ def main():
                     best_valid = current_valid
                     _save_checkpoint(output_dir / "best.pt", {
                         "format": "pocketdiff-v4-checkpoint",
-                        "version": 3,
-                        "architecture": "pocketdiff-v4.2-rigid-oracle-bridge",
+                        "version": 4,
+                        "architecture": "pocketdiff-v4.3-remaining-transform-contract",
                         "model": model.state_dict(),
                         "optimizer": optimizer.state_dict(),
                         "scaler": scaler.state_dict(),

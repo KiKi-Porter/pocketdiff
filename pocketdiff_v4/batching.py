@@ -17,7 +17,7 @@ def collate_complexes(samples: List[Dict[str, object]]) -> Dict[str, object]:
         key: [] for key in (
             "apo_pos", "protein_feature", "ligand_pos", "ligand_type",
             "atom_to_residue", "residue_type", "residue_feature",
-            "residue_center_apo", "frame_index", "chi_geometry_mask",
+            "residue_center_apo", "frame_index", "backbone_mask", "chi_geometry_mask",
             "chi_axis", "chi_ptr", "chi_downstream", "chi_quartet",
             "chi_apo", "chi_ambiguous_mask", "rr_edge_index",
             "lr_edge_index", "ll_edge_index",
@@ -39,6 +39,12 @@ def collate_complexes(samples: List[Dict[str, object]]) -> Dict[str, object]:
 
         input_parts["apo_pos"].append(x["apo_pos"])
         input_parts["protein_feature"].append(x["protein_feature"])
+        input_parts["backbone_mask"].append(
+            x.get(
+                "backbone_mask",
+                x["protein_feature"][:, -1].to(dtype=torch.bool),
+            )
+        )
         input_parts["ligand_pos"].append(x["ligand_pos"])
         input_parts["ligand_type"].append(x["ligand_type"])
         input_parts["atom_to_residue"].append(x["atom_to_residue"] + residues)

@@ -65,7 +65,7 @@ def _model():
     )
 
 
-def test_bridge_targets_fit_the_models_bounded_action_ranges():
+def test_bridge_targets_are_complete_remaining_transforms():
     record = _record()
     batch = collate_complexes([record])
     inputs, targets = batch["input"], batch["target"]
@@ -82,10 +82,36 @@ def test_bridge_targets_fit_the_models_bounded_action_ranges():
         remaining_steps=1,
     )
     assert valid.tolist() == [True]
-    assert torch.linalg.vector_norm(translation, dim=-1).max() <= 0.95 + 1e-6
-    assert torch.linalg.vector_norm(rotation, dim=-1).max() <= 0.475 + 1e-6
+    expected = remaining_transform_current_to_holo(
+        *residue_frames(apo, inputs["frame_index"])[:2],
+        *residue_frames(far_holo, inputs["frame_index"])[:2],
+        frame_valid=valid,
+    )
+    assert torch.allclose(translation, expected.translation_local)
+    assert torch.allclose(rotation, expected.rotvec_local)
     assert chi_mask[0, 0]
-    assert torch.allclose(chi[0, 0], torch.tensor(0.3325), atol=1e-6)
+    assert torch.allclose(chi[0, 0], torch.tensor(0.7), atol=1e-6)
+
+
+def test_remaining_target_is_independent_of_rollout_length():
+    record = _record()
+    batch = collate_complexes([record])
+    inputs, targets = batch["input"], batch["target"]
+    current = inputs["apo_pos"]
+    outputs = [
+        _bridge_step_targets(
+            _model(),
+            inputs,
+            targets,
+            current,
+            torch.zeros((1, 5)),
+            remaining_steps=steps,
+        )[:3]
+        for steps in (1, 2, 4, 20)
+    ]
+    for actual in outputs[1:]:
+        for reference, candidate in zip(outputs[0], actual):
+            assert torch.allclose(reference, candidate)
 
 
 def test_bridge_solver_reaches_rigid_endpoint_across_rotated_local_frames():
@@ -110,11 +136,46 @@ def test_bridge_solver_reaches_rigid_endpoint_across_rotated_local_frames():
         current = apply_motion(
             sample,
             current,
-            bridge.translation_local / remaining,
-            bridge.rotvec_local / remaining,
+            bridge.translation_local,
+            bridge.rotvec_local,
             torch.zeros((1, 5)),
+            fraction=1.0 / remaining,
         )
     assert torch.allclose(current, target, atol=2e-5, rtol=2e-5)
+
+
+def test_bridge_solver_reaches_same_endpoint_for_multiple_step_counts():
+    record = _record()
+    sample = record["input"]
+    target = record["target"]["holo_pos"]
+    target_origin, target_frame, target_valid = residue_frames(
+        target, sample["frame_index"]
+    )
+    endpoints = []
+    for steps in (1, 2, 4, 20):
+        current = sample["apo_pos"].clone()
+        for step in range(steps):
+            current_origin, current_frame, current_valid = residue_frames(
+                current, sample["frame_index"]
+            )
+            bridge = remaining_transform_current_to_holo(
+                current_origin,
+                current_frame,
+                target_origin,
+                target_frame,
+                frame_valid=current_valid & target_valid,
+            )
+            current = apply_motion(
+                sample,
+                current,
+                bridge.translation_local,
+                bridge.rotvec_local,
+                torch.zeros((1, 5)),
+                fraction=1.0 / (steps - step),
+            )
+        endpoints.append(current)
+    for endpoint in endpoints[1:]:
+        assert torch.allclose(endpoint, endpoints[0], atol=3e-5, rtol=3e-5)
 
 
 def test_graph_balanced_loss_weights_complexes_equally():

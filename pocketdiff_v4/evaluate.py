@@ -62,7 +62,8 @@ def _direction_cosine(apo: torch.Tensor, holo: torch.Tensor, predicted: torch.Te
         torch.linalg.vector_norm(target, dim=-1)
         * torch.linalg.vector_norm(motion, dim=-1)
     ).clamp_min(1e-8)
-    valid = torch.linalg.vector_norm(target, dim=-1) > 1e-8
+    # Tiny apo/holo differences have numerically arbitrary directions.
+    valid = torch.linalg.vector_norm(target, dim=-1) > 0.05
     if not bool(valid.any()):
         return 0.0
     return float((numerator[valid] / denominator[valid]).mean().item())

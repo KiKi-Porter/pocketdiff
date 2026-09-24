@@ -21,7 +21,15 @@ CURRENT_CHI_VERSION = "current-chi-v1-canonical-heavy-atoms"
 # planar pi-periodic cases follow AlphaFold residue_constants.chi_pi_periodic;
 # LEU/VAL branched terminal aliases are conservatively excluded too, not
 # treated as pi-periodic. This mask never disables geometry updates.
-AMBIGUOUS_CHI_SLOTS = {"ASP": 1, "GLU": 2, "PHE": 1, "TYR": 1, "LEU": 1, "VAL": 0}
+AMBIGUOUS_CHI_SLOTS = {
+    "ASP": 1,
+    "GLU": 2,
+    "PHE": 1,
+    "TYR": 1,
+    "LEU": 1,
+    "VAL": 0,
+    "ARG": 3,
+}
 
 
 @dataclass(frozen=True)

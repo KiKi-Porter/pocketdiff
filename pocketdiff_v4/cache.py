@@ -13,7 +13,7 @@ from pocketdiff.geometry.current_state import AMBIGUOUS_CHI_SLOTS
 
 
 CACHE_FORMAT = "pocketdiff-v4-residue-cache"
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 
 def _radius_edges(source: torch.Tensor, target: torch.Tensor, cutoff: float,
@@ -41,6 +41,26 @@ def _torch_load_trusted(path: str):
         return torch.load(path, map_location="cpu")
 
 
+def _canonical_protein_feature(
+    value,
+    atom_to_residue: torch.Tensor,
+    residue_names: List[str],
+) -> torch.Tensor:
+    """Rebuild the TargetDiff amino-acid channels from residue names."""
+    feature = value.protein_feature.float().contiguous().clone()
+    if feature.ndim != 2 or feature.shape[1] != 27:
+        raise ValueError("source protein_feature must have shape [N, 27]")
+    residue_type = torch.tensor(
+        [TARGETDIFF_RESIDUE_IDS[name] for name in residue_names],
+        dtype=torch.long,
+    )
+    residue_one_hot = torch.nn.functional.one_hot(
+        residue_type[atom_to_residue], num_classes=20
+    ).to(feature.dtype)
+    feature[:, 6:26] = residue_one_hot
+    return feature
+
+
 def encode_complex(value, split: str) -> Dict[str, object]:
     apo = value.protein_pos_apo.float().contiguous()
     holo = value.protein_pos_holo.float().contiguous()
@@ -65,6 +85,9 @@ def encode_complex(value, split: str) -> Dict[str, object]:
     residue_type = torch.tensor(
         [TARGETDIFF_RESIDUE_IDS[name] for name in residue_names], dtype=torch.long
     )
+    protein_feature = _canonical_protein_feature(
+        value, atom_to_residue, residue_names
+    )
     chi_apo = value.chi_apo.float().contiguous()[..., :NUM_CHI]
     chi_holo = value.chi_holo.float().contiguous()[..., :NUM_CHI]
     chi_supervision_mask = value.chi_mask.bool()[..., :NUM_CHI] & topology_chi_mask
@@ -77,15 +100,19 @@ def encode_complex(value, split: str) -> Dict[str, object]:
     residue_counts = torch.bincount(atom_to_residue, minlength=nr).float().clamp_min(1)
     residue_center_apo.index_add_(0, atom_to_residue, apo)
     residue_center_apo /= residue_counts[:, None]
-    residue_feature = torch.zeros(nr, value.protein_feature.shape[-1])
-    residue_feature.index_add_(0, atom_to_residue, value.protein_feature.float())
+    residue_feature = torch.zeros(nr, protein_feature.shape[-1])
+    residue_feature.index_add_(0, atom_to_residue, protein_feature)
     residue_feature /= residue_counts[:, None]
     return {
         "sample_id": value.sample_id,
         "split": split,
         "input": {
             "apo_pos": apo,
-            "protein_feature": value.protein_feature.float().contiguous(),
+            "protein_feature": protein_feature,
+            "backbone_mask": torch.tensor(
+                [name in {"N", "CA", "C", "O"} for name in value.protein_atom_name],
+                dtype=torch.bool,
+            ),
             "ligand_pos": ligand,
             "ligand_type": value.ligand_type_ref.long().contiguous(),
             "atom_to_residue": atom_to_residue,
@@ -134,6 +161,7 @@ def build_cache(source_path: str, output_path: str):
         "source": source_fingerprint(source_path),
         "geometry": "N-CA-C local frame; sparse chi topology; cached apo residue and ligand-residue radius graphs",
         "label_isolation": "model inputs and supervised targets are stored under separate input/target keys",
+        "feature_contract": "TargetDiff residue order with canonical AA one-hot in protein_feature[:, 6:26]",
         "counts": {key: len(rows) for key, rows in splits.items()},
         "sample_ids": ids,
         "splits": splits,

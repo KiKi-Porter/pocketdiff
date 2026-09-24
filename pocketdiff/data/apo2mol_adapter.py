@@ -531,14 +531,14 @@ class Apo2MolAdapter:
             [atom.atom_name for atom in canonical_atoms],
             torch.tensor(atom_to_residue, dtype=torch.long),
             residue_names,
-            num_chi=4,
+            num_chi=5,
         )
         chi_holo, chi_holo_mask = extract_chi_angles(
             torch.from_numpy(centered_holo.astype(np.float32, copy=False)),
             [atom.atom_name for atom in canonical_atoms],
             torch.tensor(atom_to_residue, dtype=torch.long),
             residue_names,
-            num_chi=4,
+            num_chi=5,
         )
         chi_mask = chi_apo_mask & chi_holo_mask
         chi_apo = torch.where(chi_mask, chi_apo, torch.zeros_like(chi_apo))

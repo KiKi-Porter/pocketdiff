@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Dict
 
 import torch
@@ -252,9 +253,9 @@ class PocketDiffV4Model(nn.Module):
         layers: int = 6,
         radial_count: int = 24,
         radial_cutoff: float = 16.0,
-        max_translation: float = 1.0,
-        max_rotation: float = 0.5,
-        max_chi_step: float = 0.35,
+        max_translation: float = 8.0,
+        max_rotation: float = math.pi,
+        max_chi_step: float = math.pi,
     ):
         super().__init__()
         self.hidden = hidden
@@ -545,7 +546,12 @@ class PocketDiffV4Model(nn.Module):
             & valid[:, None]
         )
         chi_delta = torch.where(chi_geometry_mask, chi_delta, torch.zeros_like(chi_delta))
+        # The public contract is a remaining transform. Keep the old keys as
+        # aliases so older smoke tests and checkpoints fail less abruptly.
         return {
+            "remaining_translation_local": translation_local,
+            "remaining_rotvec_local": rotation_local,
+            "remaining_chi": chi_delta,
             "translation_local": translation_local,
             "rotation_local": rotation_local,
             "chi_delta": chi_delta,
