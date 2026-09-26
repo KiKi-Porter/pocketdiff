@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RUN_DIR="${1:-pocketdiff_v4/runs/v431_3000_s2_m05_remaining_20260924}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
+export PYTHONPATH="${PYTHONPATH:-.}"
+
+exec conda run -n targetdiff torchrun --standalone --nproc_per_node=4 \
+  --module pocketdiff_v4.train \
+  --data pocketdiff_v4/data/residue_graphs_v42_contract.pt \
+  --output-dir "${RUN_DIR}" \
+  --epochs 200 \
+  --updates 2400 \
+  --batch-size 64 \
+  --max-steps 4 \
+  --train-steps 2 \
+  --validation-steps 2 \
+  --save-every 12 \
+  --valid-every 1 \
+  --log-every 24 \
+  --num-workers 0 \
+  --noise-scale-min 0.0 \
+  --noise-scale-max 0.0 \
+  --schedule-type remaining \
+  --fixed-fraction 0.20 \
+  --motion-scale 0.5 \
+  --direction-weight 0.0 \
+  --disable-chi

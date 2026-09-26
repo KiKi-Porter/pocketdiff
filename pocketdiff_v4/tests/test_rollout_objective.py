@@ -203,6 +203,172 @@ def test_multistep_rollout_loss_has_finite_backward():
     assert all(torch.isfinite(gradient).all() for gradient in gradients)
 
 
+def test_final_endpoint_weight_is_outside_step_average():
+    torch.manual_seed(31)
+    batch = collate_complexes([_record("endpoint-weight")])
+    batch["input"]["backbone_mask"] = torch.ones(
+        batch["input"]["apo_pos"].shape[0], dtype=torch.bool
+    )
+    model = _model()
+    common = {
+        "step_count": 2,
+        "disable_chi": True,
+        "schedule_type": "fixed",
+        "fixed_fraction": 0.2,
+    }
+    without_endpoint, _ = _rollout_loss(
+        model, batch, max_steps=2, final_endpoint_weight=0.0, **common
+    )
+    with_endpoint, metrics = _rollout_loss(
+        model, batch, max_steps=2, final_endpoint_weight=1.0, **common
+    )
+    assert metrics["endpoint_loss"] > 0
+    assert torch.allclose(
+        with_endpoint - without_endpoint,
+        metrics["endpoint_loss"] + metrics["truncated_endpoint_loss"],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+def test_backbone_only_objective_ignores_sidechain_holo_changes():
+    torch.manual_seed(37)
+    record = _record("backbone-mask")
+    batch = collate_complexes([record])
+    batch["input"]["backbone_mask"] = torch.tensor(
+        [True, True, True, True, False], dtype=torch.bool
+    )
+    changed = {
+        "input": batch["input"],
+        "target": dict(batch["target"]),
+    }
+    changed["target"]["holo_pos"] = batch["target"]["holo_pos"].clone()
+    changed["target"]["holo_pos"][-1] += torch.tensor([7.0, -4.0, 3.0])
+    kwargs = {
+        "max_steps": 2,
+        "step_count": 2,
+        "disable_chi": True,
+        "direction_weight": 0.0,
+        "ca_direction_weight": 0.0,
+        "backbone_only_objective": True,
+        "schedule_type": "fixed",
+        "fixed_fraction": 0.2,
+    }
+    model = _model()
+    torch.manual_seed(101)
+    baseline_loss, baseline_metrics = _rollout_loss(model, batch, **kwargs)
+    torch.manual_seed(101)
+    changed_loss, changed_metrics = _rollout_loss(model, changed, **kwargs)
+    assert torch.allclose(baseline_loss, changed_loss, atol=1e-6, rtol=1e-6)
+    for key in ("bridge_loss", "final_endpoint_loss", "truncated_endpoint_loss"):
+        assert torch.allclose(
+            baseline_metrics[key], changed_metrics[key], atol=1e-6, rtol=1e-6
+        )
+
+
+def test_truncated_bptt_reaches_the_preceding_rollout_step():
+    torch.manual_seed(43)
+    batch = collate_complexes([_record("bptt")])
+    batch["input"]["backbone_mask"] = torch.ones(
+        batch["input"]["apo_pos"].shape[0], dtype=torch.bool
+    )
+
+    detached_model = _model()
+    detached_loss, _ = _rollout_loss(
+        detached_model,
+        batch,
+        max_steps=2,
+        step_count=2,
+        disable_chi=True,
+        direction_weight=0.0,
+        final_endpoint_weight=1.0,
+        bptt_steps=0,
+        schedule_type="remaining",
+    )
+    detached_loss.backward()
+    detached_grad = detached_model.translation_gate[-1].weight.grad.detach().clone()
+
+    bptt_model = _model()
+    bptt_model.load_state_dict(detached_model.state_dict())
+    bptt_loss, _ = _rollout_loss(
+        bptt_model,
+        batch,
+        max_steps=2,
+        step_count=2,
+        disable_chi=True,
+        direction_weight=0.0,
+        final_endpoint_weight=1.0,
+        bptt_steps=2,
+        schedule_type="remaining",
+    )
+    bptt_loss.backward()
+    bptt_grad = bptt_model.translation_gate[-1].weight.grad.detach()
+
+    assert torch.isfinite(bptt_grad).all()
+    assert not torch.allclose(detached_grad, bptt_grad)
+
+
+def test_rollout_loss_reports_consistent_component_decomposition():
+    torch.manual_seed(37)
+    batch = collate_complexes([_record("loss-components")])
+    batch["input"]["backbone_mask"] = torch.ones(
+        batch["input"]["apo_pos"].shape[0], dtype=torch.bool
+    )
+    model = _model()
+    loss, metrics = _rollout_loss(
+        model,
+        batch,
+        max_steps=2,
+        step_count=2,
+        disable_chi=True,
+        direction_weight=0.0,
+        final_endpoint_weight=1.0,
+        schedule_type="remaining",
+    )
+    expected = (
+        0.2 * metrics["rigid_loss"]
+        + 0.75 * metrics["bridge_loss"]
+        + 0.1 * metrics["ca_motion_loss"]
+        + 0.05 * metrics["ca_direction_loss"]
+        + metrics["final_endpoint_loss"]
+        + metrics["truncated_endpoint_loss"]
+    )
+    assert torch.allclose(loss.detach(), expected, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(
+        metrics["endpoint_loss"], metrics["final_endpoint_loss"]
+    )
+    assert torch.equal(metrics["direction_loss"], torch.zeros_like(metrics["direction_loss"]))
+
+
+def test_ca_motion_and_direction_losses_reach_rigid_heads():
+    torch.manual_seed(41)
+    batch = collate_complexes([_record("ca-motion-loss")])
+    batch["input"]["backbone_mask"] = torch.ones(
+        batch["input"]["apo_pos"].shape[0], dtype=torch.bool
+    )
+    model = _model()
+    loss, metrics = _rollout_loss(
+        model,
+        batch,
+        max_steps=2,
+        step_count=2,
+        disable_chi=True,
+        direction_weight=0.0,
+        ca_motion_weight=0.1,
+        ca_direction_weight=0.05,
+        schedule_type="remaining",
+    )
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert metrics["ca_motion_loss"] > 0
+    assert metrics["ca_direction_loss"] > 0
+    assert model.translation_gate[-1].weight.grad is not None
+    assert model.rotation_gate[-1].weight.grad is not None
+    assert model.translation_gate[-1].weight.grad.abs().sum() > 0
+    assert model.rotation_gate[-1].weight.grad.abs().sum() > 0
+
+
 def test_oracle_rigid_loss_trains_rigid_heads_without_chi_gradients():
     random.seed(23)
     torch.manual_seed(23)

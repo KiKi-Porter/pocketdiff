@@ -12,8 +12,16 @@ __pycache__/
 core
 pocketdiff_v4/data/
 pocketdiff_v4/runs/
+pocketdiff/runs/
+pocketdiff_v1/
+pocketdiff_v2/
+pocketdiff_v3/
+Apo2Mol-main/
+DynamicBind-main/
+Pocket2Mol-main/
+targetdiff-main/
+*.pdf
 
 # Local editor/agent state.
 .codex-local/
 .codex-tasks/
-

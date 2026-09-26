@@ -1,7 +1,12 @@
-# PocketDiff v4
+# PocketDiff v4.4.0
 
 PocketDiff v4 is an independent residue-level, DynamicBind-inspired model
 candidate. It does not alter the frozen v3 implementation or checkpoint.
+
+The v4.4 objective is deliberately backbone-first: given apo protein
+coordinates and ligand atom conditions, training emphasizes the N/CA/C/O
+backbone transition toward holo. Side-chain chi and all-atom accuracy remain
+secondary until the backbone field is demonstrably useful.
 
 ## Architecture
 
@@ -13,21 +18,29 @@ candidate. It does not alter the frozen v3 implementation or checkpoint.
   position, and local molecular geometry remain atom-resolved.
 - Message blocks use invariant scalar channels and covariant vector channels.
   Scalar gates act on relative-coordinate directions and transported vectors.
-  The residue heads produce local translation, local SO(3) rotation, and five
-  periodic side-chain chi increments.
+  The residue heads predict complete remaining local translation, local SO(3)
+  rotation, and four periodic side-chain chi increments.
 - The coordinate solver applies a residue-local rigid transform and then
   topology-defined sparse chi rotations. Its interface is shared by training
   rollouts and inference.
-- The training objective is intended to include randomized bridge states,
-  detached self-generated intermediate states, endpoint coordinate loss, and
-  bounded per-step motion. Training and sampler implementation must preserve
-  this state/update contract.
-- At every rollout state, the motion target is recomputed from the exact
-  current-to-holo local-frame bridge, divided by remaining steps, then
-  projected into the translation/rotation/chi ranges the heads can emit. The
-  same rigid-plus-chi solver applies model predictions before a direct
-  coordinate endpoint loss is measured. Motion and endpoint losses are
-  normalized per complex before batch averaging, avoiding a node-count bias.
+- The model predicts a complete current-to-holo remaining transform. The
+  sampler chooses the update fraction without changing the model target.
+- v4.3.3 adds residue-balanced CA displacement and CA direction losses on top
+  of the v4.3.2 complete-remaining-transform training contract. Initial weights
+  are 0.1 for CA displacement and 0.05 for CA direction; both are logged
+  separately. Inference motion scale remains outside the training loss.
+- v4.3.2 keeps the deployment sampler calibration while training the model on
+  the complete remaining transform. Training logs report rigid, bridge,
+  endpoint, and direction loss components.
+- v4.3.1 uses fixed four-step autonomous training rollouts and a validation-
+  selected fixed `0.20` relaxation fraction. Checkpoint selection uses
+  autonomous validation backbone RMSD.
+- Rigid-only endpoint supervision is restricted to backbone atoms. The final
+  endpoint term is added outside the per-step loss average. Direction loss is
+  disabled by default and uses a `0.05 Å` target-motion threshold when enabled.
+- v4.4 adds `--backbone-only-objective`, masking bridge, final endpoint, and
+  truncated endpoint coordinate losses to the cached backbone mask. Checkpoint
+  selection remains autonomous validation backbone RMSD.
 
 The custom scalar/vector implementation avoids an `e3nn` runtime dependency.
 Equivariance is enforced by construction for coordinate updates: local scalar
@@ -61,44 +74,76 @@ apo/holo structures and is not a solver or model input.
 2. Build and reload the fixed 3000/300/300 CPU cache; verify its source
    fingerprint, exact sample identities, and disjoint split IDs.
 3. Add model-level equivariance and finite forward/backward tests.
-4. Pass bounded single-complex overfit and multi-step rollout stability tests.
-5. Train on all 3000 training examples and reload the final checkpoint.
-6. Only after training completes, evaluate train/valid/test with the frozen v3
-   split and compare paired sample predictions. Do not replace v3 unless v4 is
-   no worse on the predeclared validation/test criteria.
+4. Compare sampler schedules on validation only, then freeze the selected
+   schedule before test evaluation.
+5. Pass bounded single-complex overfit and autonomous multi-step stability
+   tests.
+6. Train on all 3000 training examples and reload the selected checkpoint.
+7. Evaluate train/valid/test with the frozen split and paired bootstrap
+   intervals for CA, backbone, and all-atom RMSD. Keep v3 as the accepted
+   baseline unless v4 is no worse on predeclared held-out criteria.
 
 Stability smoke tests may inspect losses and finite coordinates; they are not
 apo/holo performance evaluations. No final performance evaluation is allowed
 before full training has completed.
 
-## Medium Run
+## v4.3.1 Run
 
-The validated CPU cache is `pocketdiff_v4/data/residue_graphs_medium.pt`
-(3000/300/300 records, source split IDs preserved). To launch the detached
-medium run and its post-training evaluations:
+The validated CPU cache is `pocketdiff_v4/data/residue_graphs_v42_contract.pt`
+(3000/300/300 records, source split IDs preserved). Launch training with:
 
 ```bash
-bash pocketdiff_v4/run_medium_and_evaluate.sh
+bash pocketdiff_v4/run_v431_3000.sh
 ```
 
-The runner uses physical GPUs 4–7 with four Gloo ranks, per-rank batch size 64,
-50 epochs, five-step training rollouts, and zero DataLoader workers. It saves
-`latest.pt` every epoch. After the 600-update training summary confirms
-completion, it evaluates all three splits for v4, evaluates the frozen v3
-checkpoint with four Gaussian-initialized steps (no VP-prior label leakage),
-and writes a paired comparison. Artifacts are isolated under
-`pocketdiff_v4/runs/medium_3000_20260923/`.
+The runner uses GPUs 4–7 with four Gloo ranks, per-rank batch size 64, fixed
+four-step autonomous rollouts, zero initial protein noise, no direction loss,
+and the validation-selected fixed `0.20` schedule. Evaluation reads the frozen
+schedule from checkpoint metadata unless explicitly overridden. Checkpoints
+store source-cache and prepared-cache fingerprints plus the model geometry
+configuration.
 
-## Run Result
+Before v4.3.1 training, the existing v4.3 checkpoint was compared on all 300
+validation complexes. `fixed_020` achieved mean backbone RMSD improvement of
+`0.01331 Å` and all-atom improvement of `0.01107 Å`; the old remaining-fraction
+schedule regressed backbone RMSD by `0.01110 Å`. These are validation-only
+sampler-calibration results, not a new model result.
 
-The 600-update run completed in 208.7 seconds with finite losses and
-checkpoints. The raw four-step sampler (initial-noise scale 1.0) regressed:
-all-protein RMSD was 0.5229 Å on valid and 0.5145 Å on test, versus apo at
-0.4520/0.4456 Å and v3 Gaussian at 0.4679/0.4674 Å.
+## v4.4 Backbone-Focused Run
 
-Validation-only calibration found that setting initial-noise scale to 0.0
-nearly reproduces apo. Its final all-protein RMSD was 0.4518 Å valid and
-0.4459 Å test; mean coordinate displacement was only 0.008 Å. It beats v3's
-noisy Gaussian sampler but does not demonstrate useful learned motion and is
-0.00032 Å worse than apo on test. Keep v3 as the accepted model; do not treat
-this no-op-like output as a successful v4 baseline.
+The v4.4 runner uses GPUs 4-7, 2400 updates, two-step autonomous rollouts,
+zero initial protein noise, no chi updates, zero CA direction-loss weight, and
+backbone-only bridge/endpoint supervision:
+
+```bash
+bash pocketdiff_v4/run_v44_3000.sh
+```
+
+The completed run is stored in
+`pocketdiff_v4/runs/v440_launch_probe_20260925`. Its clean test result was
+`+0.00622 Å` CA RMSD improvement and `+0.00408 Å` backbone RMSD improvement;
+the paired 95% backbone interval was `[-0.00349, 0.01277] Å`, so this is
+non-regressive but not a statistically confirmed upgrade over v4.3.4.
+Direction cosine was `0.07695`, indicating that ligand-conditioned backbone
+direction learning remains the primary limitation.
+
+## v4.3.3 Run and Results
+
+The v4.3.3 3000-sample run uses GPUs 4–7, 2400 updates, two autonomous training
+steps, the validation-selected `remaining` schedule, inference motion scale
+`0.5`, and CA loss weights `0.1` (displacement) and `0.05` (direction):
+
+```bash
+bash pocketdiff_v4/run_v433_3000.sh
+bash pocketdiff_v4/evaluate_v433_controls.sh
+```
+
+Training completed for 200 epochs. Best validation autonomous backbone RMSD
+was `0.42208 Å`. On validation, the selected two-step prediction improved
+atom/CA/backbone RMSD by `0.01271/0.02015/0.01811 Å`. On test, atom RMSD
+improved by `0.00414 Å` with paired-bootstrap 95% CI
+`[-0.00090, 0.00972] Å`; CA and backbone gains were smaller and their
+confidence intervals crossed zero. Test direction cosine increased from
+`0.0641` in v4.3.2 to `0.1132`, while the second autonomous step partially
+reversed the first-step improvement. Noisy learned controls still regressed
+against noisy apo, so this model is not a denoiser.

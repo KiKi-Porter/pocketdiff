@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import argparse
 from pathlib import Path
 
 import torch
@@ -13,10 +14,20 @@ from .train import _rollout_loss, _save_checkpoint
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--data", default="pocketdiff_v4/data/residue_graphs_v42_contract.pt"
+    )
+    parser.add_argument(
+        "--output-dir", default="pocketdiff_v4/runs/smoke_v434_cpu"
+    )
+    parser.add_argument("--bptt-steps", type=int, default=2)
+    parser.add_argument("--backbone-only-objective", action="store_true")
+    args = parser.parse_args()
     random.seed(317)
     torch.manual_seed(317)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    cache = load_cache("pocketdiff_v4/data/residue_graphs_v41.pt")
+    cache = load_cache(args.data)
     sample = cache["splits"]["train"][0]
     batch = collate_complexes([sample])
 
@@ -40,10 +51,18 @@ def main():
         loss, _ = _rollout_loss(
             model,
             batch,
-            max_steps=4,
-            oracle_rollout=True,
+            max_steps=2,
+            step_count=2,
+            oracle_rollout=False,
             disable_chi=True,
-            direction_weight=0.1,
+            direction_weight=0.0,
+            bptt_steps=args.bptt_steps,
+            schedule_type="remaining",
+            ca_motion_weight=0.1,
+            ca_direction_weight=0.0,
+            backbone_only_objective=args.backbone_only_objective,
+            backbone_bridge_weight=1.0,
+            backbone_endpoint_weight=1.0,
         )
         if not torch.isfinite(loss):
             raise FloatingPointError("smoke rollout produced non-finite loss")
@@ -54,7 +73,7 @@ def main():
         optimizer.step()
         losses.append(float(loss.detach()))
 
-    output_dir = Path("pocketdiff_v4/runs/smoke")
+    output_dir = Path(args.output_dir)
     checkpoint_path = output_dir / "checkpoint.pt"
     module = model
     _save_checkpoint(checkpoint_path, {
@@ -84,6 +103,7 @@ def main():
         "last_10_mean_loss": sum(losses[-10:]) / 10.0,
         "strict_checkpoint_reload": True,
         "finite_multistep_rollout": True,
+        "backbone_only_objective": args.backbone_only_objective,
         "performance_evaluation": "not run",
     }
     output_dir.mkdir(parents=True, exist_ok=True)

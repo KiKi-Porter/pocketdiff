@@ -14,12 +14,12 @@ def residue_frames(pos: torch.Tensor, frame_index: torch.Tensor):
     n, ca, c = (xyz[indices[:, i]] for i in range(3))
     u = c - ca
     v = n - ca
-    u_norm = torch.linalg.vector_norm(u, dim=-1)
-    v_norm = torch.linalg.vector_norm(v, dim=-1)
+    u_norm = torch.sqrt((u * u).sum(-1).clamp_min(1e-12))
+    v_norm = torch.sqrt((v * v).sum(-1).clamp_min(1e-12))
     e1 = u / u_norm.clamp_min(1e-6)[:, None]
     vn = v / v_norm.clamp_min(1e-6)[:, None]
     cross = torch.cross(e1, vn, dim=-1)
-    cross_norm = torch.linalg.vector_norm(cross, dim=-1)
+    cross_norm = torch.sqrt((cross * cross).sum(-1).clamp_min(1e-12))
     e3 = cross / cross_norm.clamp_min(1e-6)[:, None]
     e2 = torch.cross(e3, e1, dim=-1)
     frame = torch.stack((e1, e2, e3), dim=-1)
@@ -33,13 +33,23 @@ def residue_frames(pos: torch.Tensor, frame_index: torch.Tensor):
 def axis_angle_matrix(rotvec: torch.Tensor) -> torch.Tensor:
     """Stable Rodrigues exponential with a differentiable zero-angle limit."""
     theta2 = (rotvec * rotvec).sum(-1, keepdim=True)
-    theta = torch.sqrt(theta2.clamp_min(1e-16))
+    theta = torch.sqrt(theta2.clamp_min(1e-12))
     x, y, z = rotvec.unbind(-1)
     zero = torch.zeros_like(x)
     skew = torch.stack((zero, -z, y, z, zero, -x, -y, x, zero), dim=-1).reshape(-1, 3, 3)
     eye = torch.eye(3, dtype=rotvec.dtype, device=rotvec.device).expand_as(skew)
-    a = torch.where(theta2 < 1e-8, 1 - theta2 / 6 + theta2.square() / 120, torch.sin(theta) / theta)
-    b = torch.where(theta2 < 1e-8, 0.5 - theta2 / 24 + theta2.square() / 720, (1 - torch.cos(theta)) / theta2.clamp_min(1e-16))
+    theta_safe = theta.clamp_min(1e-6)
+    theta2_safe = theta2.clamp_min(1e-12)
+    a = torch.where(
+        theta2 < 1e-8,
+        1 - theta2 / 6 + theta2.square() / 120,
+        torch.sin(theta) / theta_safe,
+    )
+    b = torch.where(
+        theta2 < 1e-8,
+        0.5 - theta2 / 24 + theta2.square() / 720,
+        (1 - torch.cos(theta)) / theta2_safe,
+    )
     return eye + a[:, :, None] * skew + b[:, :, None] * (skew @ skew)
 
 
@@ -75,13 +85,18 @@ def extract_chi_from_quartets(
     b0 = points[..., 1, :] - points[..., 0, :]
     b1 = points[..., 2, :] - points[..., 1, :]
     b2 = points[..., 3, :] - points[..., 2, :]
-    axis = b1 / torch.linalg.vector_norm(b1, dim=-1, keepdim=True).clamp_min(1.0e-8)
+    b1_norm = torch.sqrt((b1 * b1).sum(-1, keepdim=True).clamp_min(1.0e-12))
+    axis = b1 / b1_norm
     v = b0 - (b0 * axis).sum(-1, keepdim=True) * axis
     w = b2 - (b2 * axis).sum(-1, keepdim=True) * axis
-    values = torch.atan2(
-        (torch.cross(axis, v, dim=-1) * w).sum(-1),
-        (v * w).sum(-1),
-    )
+    numerator = (torch.cross(axis, v, dim=-1) * w).sum(-1)
+    denominator = (v * w).sum(-1)
+    # atan2 has undefined derivatives when both arguments are zero. Keep the
+    # value finite and explicitly mask degenerate torsions afterward.
+    scale = torch.sqrt(
+        numerator.square() + denominator.square()
+    ).clamp_min(1.0e-8)
+    values = torch.atan2(numerator / scale, denominator / scale)
     return torch.where(valid & torch.isfinite(values), values, torch.zeros_like(values))
 
 
