@@ -1,0 +1,31 @@
+{
+  "release_id": "CoGen_public_20261029",
+  "created": "2026-10-29",
+  "purpose": "Code, configuration, tests, and selected checkpoints for the CoGen baseline",
+  "excluded": [
+    "prepared training caches",
+    "MD trajectories",
+    "bridge-state caches",
+    "training runs and logs",
+    "duplicate intermediate checkpoints",
+    "generated evaluation outputs"
+  ],
+  "checkpoints": {
+    "ligand_base": "ligand_generator/pretrained_models/pretrained_diffusion.pt",
+    "ligand_bridge_adapter": "ligand_generator/checkpoints/bridge_finetune_full/internal_adapter_best.pt",
+    "pocket_base": "pocketdiff/checkpoints/pocketdiff_v48_base.pt",
+    "pocket_noisy_ligand": "pocketdiff/checkpoints/pocketdiff_noisy_ligand_ft.pt"
+  },
+  "data_requirements": {
+    "pocketdiff_cache": "external prepared Apo2Mol cache",
+    "md_cache": "external representative MD-frame cache",
+    "bridge_cache": "external PocketDiff bridge-state cache"
+  },
+  "inference_protocol": {
+    "ligand_reverse_steps": 1000,
+    "pocket_updates": 20,
+    "pocket_update_interval": 10,
+    "pocket_update_window": 200
+  },
+  "validation_scope": "Python syntax and exact public-file inventory; full training and sampling require external data"
+}

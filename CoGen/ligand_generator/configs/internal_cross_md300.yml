@@ -1,0 +1,65 @@
+data:
+  cache: ./data/md300/prepared_targetdiff_md300_10frames.pt
+  train_split: train
+  valid_split: valid
+
+model:
+  model_mean_type: C0
+  beta_schedule: sigmoid
+  beta_start: 1.e-7
+  beta_end: 2.e-3
+  v_beta_schedule: cosine
+  v_beta_s: 0.01
+  num_diffusion_timesteps: 1000
+  loss_v_weight: 100.
+  sample_time_method: symmetric
+  time_emb_dim: 0
+  time_emb_mode: simple
+  center_pos_mode: protein
+  node_indicator: True
+  model_type: uni_o2
+  num_blocks: 1
+  num_layers: 9
+  hidden_dim: 128
+  n_heads: 16
+  edge_feat_dim: 4
+  num_r_gaussian: 20
+  knn: 32
+  num_node_types: 8
+  act_fn: relu
+  norm: True
+  cutoff_mode: knn
+  ew_net_type: global
+  num_x2h: 1
+  num_h2x: 1
+  r_max: 10.
+  x2h_out_fc: False
+  sync_twoup: False
+  aplc_enabled: False
+  conservative_adapter_enabled: True
+  conservative_adapter_k: 16
+  conservative_adapter_num_r_gaussian: 16
+  conservative_adapter_max_pos_delta: 0.25
+  conservative_adapter_min_pos_delta: 0.02
+  conservative_adapter_type_scale: 0.25
+  internal_cross_enabled: True
+  internal_cross_layerwise_layers: 3
+  internal_cross_num_r_gaussian: 16
+  internal_cross_max_coord_delta: 0.15
+
+train:
+  seed: 2021
+  batch_size: 2
+  num_workers: 2
+  pos_noise_std: 0.0
+  max_grad_norm: 2.0
+  val_every: 50
+  val_time_steps: [0, 111, 222, 333, 444, 555, 666, 777, 888, 999]
+  adapter_anchor_pos_weight: 0.50
+  adapter_anchor_v_weight: 0.20
+  adapter_delta_weight: 0.02
+  internal_adapter:
+    max_iters: 3000
+    lr: 1.e-5
+    weight_decay: 0.
+    tail_layers: 0

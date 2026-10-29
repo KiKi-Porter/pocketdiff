@@ -1,0 +1,21 @@
+{
+  "project": "targetdiff_dynamic_v1",
+  "created_at": "2026-10-01",
+  "source_project": "pocketdiff_v48_clean_20261001/targetdiff-main/targetdiff-main",
+  "source_commit": "c244a28719c926ec8d03f8f652309baf5c08987a",
+  "pretrained_checkpoint": "pretrained_models/pretrained_diffusion.pt",
+  "pretrained_checkpoint_sha256": "8977821339ba31b7103b46835ef4ddbf7f15f3f2efc5cb1f2a405e7905b09db6",
+  "data_source": "/data/Model_coding/dynamic_data",
+  "architecture_status": "TargetDiff with time-conditioned layerwise APLC residuals before the final three coordinate-update layers",
+  "data_status": "300 MD trajectories, up to 10 independent representative-frame samples per trajectory",
+  "data_cache": "data/md300/prepared_targetdiff_md300_10frames.pt",
+  "data_cache_samples": 2573,
+  "data_cache_split_counts": {
+    "train": 2038,
+    "valid": 264,
+    "test": 271
+  },
+  "data_cache_rejected_samples": 60,
+  "training_config": "configs/md_dynamic.yml",
+  "pocketdiff_baseline": "../pocketdiff_v48_clean_20261001"
+}
